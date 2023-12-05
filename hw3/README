@@ -1,0 +1,13 @@
+2018147537 정강희
+
+우선 처음에 파라미터 갯수를 확인하고 invalid command인 경우에 대한 예외처리를 한다. 그리고 파일 이름이 잘못된 경우에 대해서도 ERROR로 출력하고 process::exit(2);를 통해서 예외처리를 해주었다.
+
+그 후에 대칭키를 읽어오는 과정에서 대칭키는 크기가 fixed되어있는데에 반해 실제로 읽어오는 key value는 가변적이기 때문에 key derivation function인 pbkdf2_hmac_array를 사용해서 aes_256_cbc에 사용할 키의 size인 32byte로 맞출 수 있었다.
+
+그후 enc에서는 openssl의 encrypt를 통해서 aes_256_cbc으로 cipher text를 생성하였고, 그 후에 hmac을 이용해서 key를 등록한 다음, cipher text를 입력하여 HMAC­SHA256 tag를 생성하였고, 이렇게 생성된 tag와 cipher text를 각각 tag file와 output file에 16진수로 write하였다.
+
+dec의 경우에는 16진수로 저장된 cipher text와 auth_tag 파일들을 hex::decode를 통해서 Vec<u8>의 형태로 변환한 다음, 입력한 키와 cipher text를 넣고, tag와 동일한지에 해한 확인을 verify_slice함수를 통해 할 수 있었다.
+
+그렇게 authenticate가 완료되면 openssl의 decrypt를 통해서 cipher text를 다시 복호화를해서 original text를 추출하는 과정을 거치고, output file에 복호화된 문자를 write한다. 만약 인증이 실패한다면, VERIFICATION FAILURE를 출력하고 process::exit(1);을 통해 프로그램을 종료한다.
+
+Makefile의 경우에는 cargo build를 한 다음에 생성된 파일을 제출파일 디렉토리로 옮기는 과정을 거친다. 그리고 연속으로 make를 가능하게 하기 위해서 cryp file을 지우면서 갱신한다.
